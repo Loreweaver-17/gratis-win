@@ -4,6 +4,7 @@ data/
 .cache/
 assets/composio-cli/
 assets/models/sentence-encoder/
+assets/gratis.ico
 packages/cloud/.wrangler/
 packages/cloud/worker-configuration.d.ts
 packages/cloud/.dev.vars

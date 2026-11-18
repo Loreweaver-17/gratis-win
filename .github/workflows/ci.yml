@@ -50,3 +50,30 @@ jobs:
           node test/slack-desktop.mjs
           node test/dialog-buttons.mjs
           node test/secure-storage-desktop.mjs
+  windows:
+    # Windows 11 (win32 x64) packaging check. Mirrors the mac `desktop` job:
+    # assets, unpacked build, then the same packaged-app regression.
+    # - `setup:assets` verifies the model files and (on win32) skips the
+    #   Composio helper, which Composio does not publish for Windows.
+    # - `build:win` writes assets/gratis.ico (scripts/make-ico.mjs) and runs
+    #   electron-builder --dir, producing the unpacked app in dist/win-unpacked.
+    # - `dist:win` (the NSIS installer + portable zip) is exercised by
+    #   release.yml, so CI stays fast and only re-checks the unpacked layer.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm run check
+      - run: npm run setup:assets
+      - run: npm run build:win
+      - name: Verify the packaged Windows build
+        shell: pwsh
+        run: |
+          $exe = Join-Path $PWD "dist/win-unpacked/Gratis Core.exe"
+          if (-not (Test-Path $exe)) { throw "Missing unpacked executable: $exe" }
+          $env:GRATIS_TEST_APP = $exe
+          node test/package-edition.mjs

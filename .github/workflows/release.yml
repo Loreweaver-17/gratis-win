@@ -3,7 +3,7 @@ on:
   workflow_dispatch:
     inputs:
       publish:
-        description: Publish the preview after both Mac installer checks pass
+        description: Publish the preview after the Mac and Windows installer checks pass
         type: boolean
         default: false
 permissions:
@@ -39,9 +39,47 @@ jobs:
           path: dist/*.dmg
           if-no-files-found: error
           retention-days: 14
+  win:
+    # Windows 11 (win32 x64) installer and portable zip. `dist:win` produces:
+    #   dist/Gratis-Core-<version>-win-x64.exe  (NSIS installer)
+    #   dist/Gratis-Core-<version>-win-x64.zip  (portable zip of win-unpacked)
+    # Native addons stay outside app.asar via asarUnpack (package.json "build"),
+    # so Windows Defender never has to scan inside the archive to allow the
+    # .node/.exe binaries to run.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm run check
+      - run: npm run setup:assets
+      - run: npm run build:win
+      - run: npm run dist:win
+      - name: Verify the downloadable installers
+        shell: pwsh
+        run: |
+          $version = node -p "require('./package.json').version"
+          foreach ($name in @("Gratis-Core-$version-win-x64.exe", "Gratis-Core-$version-win-x64.zip")) {
+            if (-not (Test-Path (Join-Path dist $name))) { throw "Missing installer: $name" }
+            # Both files must be a real zip container (NSIS .exe and .zip both
+            # start with the PK zip magic, and it catches truncated uploads).
+            $magic = [System.IO.File]::ReadAllBytes((Join-Path dist $name))[0..1]
+            if (($magic[0] -ne 0x50) -or ($magic[1] -ne 0x4B)) { throw "$name is not a valid archive" }
+          }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Gratis-Core-win-x64
+          path: |
+            dist/*.exe
+            dist/*.zip
+          if-no-files-found: error
+          retention-days: 14
   release:
     if: inputs.publish
-    needs: build
+    needs: [build, win]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -50,17 +88,23 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: installers
-          pattern: Gratis-Core-mac-*
+          pattern: 'Gratis-Core-*'
           merge-multiple: true
       - name: Publish tested core installers
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          test "$GITHUB_REPOSITORY" = promptadvisers/gratis
+          # Publish only from the expected repositories: upstream or this
+          # Windows fork. The artifact checks below must still all pass.
+          test "$GITHUB_REPOSITORY" = promptadvisers/gratis -o "$GITHUB_REPOSITORY" = Loreweaver-17/gratis-win
           VERSION=$(node -p 'require("./package.json").version')
           test -f "installers/Gratis-Core-$VERSION-mac-arm64.dmg"
           test -f "installers/Gratis-Core-$VERSION-mac-x64.dmg"
+          test -f "installers/Gratis-Core-$VERSION-win-x64.exe"
+          test -f "installers/Gratis-Core-$VERSION-win-x64.zip"
           test "$(find installers -maxdepth 1 -name '*.dmg' | wc -l)" -eq 2
+          test "$(find installers -maxdepth 1 -name '*.exe' | wc -l)" -eq 1
+          test "$(find installers -maxdepth 1 -name '*.zip' | wc -l)" -eq 1
           cd installers
-          sha256sum *.dmg > SHA256SUMS.txt
+          sha256sum * > SHA256SUMS.txt
           gh release create "v$VERSION" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease --title "Gratis Core $VERSION preview" --notes-file ../docs/RELEASE_NOTES.md ./*
