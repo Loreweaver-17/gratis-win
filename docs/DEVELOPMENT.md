@@ -35,6 +35,12 @@ Electron's `safeStorage` is the only credential store. macOS uses its asynchrono
 
 The Windows and Linux builds create a notification-area icon. Closing or minimizing the window while enabled schedules exist hides it to the tray and leaves `Schedules` running in the main process; quitting from the tray stops it. macOS keeps the Dock behaviour. `SCHEDULES.md` documents the user-visible contract, so update it when this changes.
 
+Agent-facing invariants (and the regression traps to avoid) are kept in [AGENTS.md](../AGENTS.md); every change on this branch is listed with its reason in [WINDOWS_CHANGES.md](./WINDOWS_CHANGES.md). Regenerate the reviewable patch with:
+
+```sh
+git format-patch --stdout origin/main..HEAD > windows-11-support.patch
+```
+
 ## Windows 11 build and packaging
 
 The Windows pipeline mirrors `package:mac` / `package-dmg` and runs entirely on Windows PowerShell, Command Prompt and Node.js 22+ (no POSIX shell, `unzip` or `curl`):
