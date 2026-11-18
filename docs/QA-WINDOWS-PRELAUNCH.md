@@ -1,5 +1,24 @@
 # Windows 11 pre-launch QA report — Gratis Core 0.4.2
 
+## GPU acceleration follow-up (resolved)
+
+The CUDA/VRAM failure below is **fixed**. Windows now selects `device:'dml'` (DirectML) for the
+semantic encoder because `onnxruntime-node@1.30.0` ships `DirectML.dll` on win32/x64; CUDA
+remains available only as an explicit override for custom ORT builds. Re-run results:
+
+- Startup telemetry: `DirectML (NVIDIA GeForce RTX 5070 Ti) active · dedicated GPU memory used for embeddings`.
+- `node scripts/qa-hardware-audit.mjs --iterations 8 --children 3` → **verdict PASS**: all 3 children
+  succeeded on `dml` (no CPU fallback), no SIGILL, VRAM 1,713 → 1,843 MB (**+130 MB dedicated**),
+  peak GPU utilization 8%, device=`dml`.
+- Setup helper added at `scripts/setup-whisper-win.mjs` (npm script
+  `setup:whisper:win`): isolated `.venv-whisper`, CUDA 12.8 PyTorch + openai-whisper, model download,
+  and `<dataDir>/voice-runtime.json` pointing Gratis at that `whisper.exe` (read by `src/voice.mjs`).
+- Whisper runtime installed with `npm run setup:whisper:win -- --model base.en`:
+  `torch-2.11.0+cu128`, `openai-whisper-20250625`, `base.en` model; `--check` reports
+  `cuda=True`, `NVIDIA GeForce RTX 5070 Ti`; `<dataDir>/voice-runtime.json` registered.
+  Latest audit reports `whisperConfigured=true`, `whisperCuda=true`, `whisperDevice=NVIDIA GeForce RTX 5070 Ti`.
+- Full suite after the change: **278 pass / 0 fail / 1 skip** (279 total).
+
 Target: Windows 11 x64, Intel Core i7-8700 (MMX/SSE4.2/AES/AVX/AVX2/FMA3, no AVX-512), NVIDIA GeForce RTX 5070 Ti (16,303 MB, driver 617.14).
 Run date: 2026-11-18. Artifacts: `qa-hardware-audit.json`, `qa-e2e-report.json`, `qa-final-tests.log`, `qa-dist-win.log`.
 

@@ -12,6 +12,10 @@
  *   4. transcribeAudio() retries the SAME wav once on CPU if CUDA fails.
  *
  * Overrides: GRATIS_WHISPER_DEVICE=auto|cuda|cpu, GRATIS_CUDA_AVAILABLE=0|1.
+ *
+ * Windows setup: scripts/setup-whisper-win.mjs writes <dataDir>/voice-runtime.json
+ * with the venv's whisper.exe, model directory and CUDA DLL search paths. It is
+ * read here so no PATH/registry mutation outside Gratis is required.
  */
 import { access, mkdir, mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
 import { constants } from 'node:fs';
@@ -85,17 +89,45 @@ export function whisperInvocation({ runtime, wav, directory, language }) {
 
 // AGENT: resolves model + local tools + execution device. `hardware` is passed
 // in from main.cjs; if absent (tests/direct calls) it probes on demand.
-export async function voiceTools(language = 'en', { hardware, platform = process.platform } = {}) {
+// AGENT: the Windows setup helper writes this file in the app data directory.
+// Keep it optional: without it Gratis keeps using PATH discovery as before.
+export async function readVoiceRuntimeConfig(dataDir) {
+  if (!dataDir || typeof dataDir !== 'string') return null;
+  try {
+    const value = JSON.parse(await readFile(join(dataDir, 'voice-runtime.json'), 'utf8'));
+    return value && typeof value === 'object' ? value : null;
+  } catch { return null; }
+}
+
+async function configuredTool(path) {
+  if (!path || !absolute(path)) return null;
+  try { await access(path, constants.X_OK); return path; } catch { return null; }
+}
+
+export async function voiceTools(language = 'en', { hardware, platform = process.platform, dataDir } = {}) {
+  const config = await readVoiceRuntimeConfig(dataDir);
   const env = { ...claudeEnvironment(), HF_HUB_OFFLINE: '1', TRANSFORMERS_OFFLINE: '1', PYTHONNOUSERSITE: '1' };
+  if (platform === 'win32' && Array.isArray(config?.pathAdditions) && config.pathAdditions.length) {
+    // claudeEnvironment() builds a colon-joined PATH; findTool() on Windows must
+    // see the semicolon-separated form so the venv and torch DLL dirs resolve.
+    env.PATH = [...config.pathAdditions, ...String(env.PATH || env.Path || '').split(';')].filter(Boolean).join(';');
+    delete env.Path;
+  }
   const model = language === 'auto' ? 'base' : 'base.en';
-  const modelDir = join(homedir(), '.cache', 'whisper');
+  const modelDir = config?.modelDir || join(homedir(), '.cache', 'whisper');
   try { await access(join(modelDir, `${model}.pt`), constants.R_OK); }
   catch { throw new Error(`Voice input needs the local Whisper ${model} model. No model was downloaded.`); }
   const capabilities = hardware || await detectHardware({ platform });
-  const device = resolveWhisperDevice(capabilities, String(process.env.GRATIS_WHISPER_DEVICE || 'auto').toLowerCase());
-  const [ffmpeg, whisper] = await Promise.all([findTool('ffmpeg', env, platform), findTool('whisper', env, platform)]);
+  const override = String(process.env.GRATIS_WHISPER_DEVICE || config?.device || 'auto').toLowerCase();
+  const device = resolveWhisperDevice(capabilities, override);
+  const configuredWhisper = await configuredTool(config?.whisper);
+  const configuredFFmpeg = await configuredTool(config?.ffmpeg);
+  const [ffmpeg, whisper] = await Promise.all([
+    configuredFFmpeg || findTool('ffmpeg', env, platform),
+    configuredWhisper || findTool('whisper', env, platform),
+  ]);
   const threads = Math.max(1, Math.min(8, (capabilities.cpu?.threads || 5) - 1));
-  return { env, model, modelDir, ffmpeg, whisper, device, fp16: device === 'cuda', threads };
+  return { env, model, modelDir, ffmpeg, whisper, device, fp16: device === 'cuda', threads, config };
 }
 
 export function pcmInfo(wav) {
@@ -126,7 +158,7 @@ export async function transcribeAudio(payload, { dataDir, settings, signal, hard
   const audio = decodeAudio(payload);
   signal?.throwIfAborted();
   const language = settings?.voiceLanguage === 'auto' ? 'auto' : 'en';
-  const runtime = await tools(language, { hardware, platform });
+  const runtime = await tools(language, { hardware, platform, dataDir });
   const parent = join(dataDir, 'voice-tmp'); await mkdir(parent, { recursive: true, mode: 0o700 });
   const directory = await mkdtemp(join(parent, 'recording-'));
   try {

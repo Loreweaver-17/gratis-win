@@ -62,7 +62,7 @@ try {
     const view = await page.evaluate(({ conversationId }) => window.orbit.memoryView({ conversationId }), { conversationId: groupId });
     return view.semantic === 'ready' ? view.semantic : null;
   }, 30000, 'semantic encoder readiness').catch(error => 'unavailable: ' + error.message);
-  check('semantic encoder starts with CPU fallback', typeof semantic === 'string' && semantic.startsWith('ready') ? 'PASS' : 'FAIL', String(semantic));
+  check('semantic encoder starts (DirectML, CPU fallback available)', typeof semantic === 'string' && semantic.startsWith('ready') ? 'PASS' : 'FAIL', String(semantic));
   await page.evaluate(({ conversationId }) => window.orbit.memoryAdd({
     conversationId, key: 'qa_passphrase', title: 'QA passphrase', content: 'The QA passphrase is blue-orange-42.',
     category: 'fact', scope: 'profile', stated: true, quote: 'The QA passphrase is blue-orange-42.',

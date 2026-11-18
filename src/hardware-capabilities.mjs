@@ -10,15 +10,20 @@
  *   src/main.cjs ................ detectHardware() at startup, logs the summary
  *     |-- src/memory-embeddings.mjs .... passes `hardware` into the worker
  *     |     `-- src/memory-embedding-worker.mjs
- *     |           deviceCandidates() -> ['cuda','cpu'] or ['cpu'] fallback
+ *     |           deviceCandidates() -> ['dml','cpu'] on Windows (or
+ *     |           ['cuda','cpu'] where CUDA is real), then CPU fallback
  *     `-- src/voice.mjs ................ resolveWhisperDevice() picks
  *                                       --device cuda|cpu for the Whisper CLI
  *   scripts/setup-assets.mjs .... nativeBuildProfile() writes the Windows x64
  *                                 profile to assets/runtime/native-build.json
  *
+ * WINDOWS GPU BACKEND: onnxruntime-node ships DirectML (DirectML.dll) on
+ * win32/x64 but no CUDA provider, so Auto selects 'dml' for the RTX 5070 Ti.
+ * CUDA remains available as an explicit override for custom ORT builds.
+ *
  * Overrides (agents: check these first when a user reports the wrong device):
- *   GRATIS_INFERENCE_DEVICE = auto | cuda | cpu   (embeddings; default auto)
- *   GRATIS_WHISPER_DEVICE   = auto | cuda | cpu   (Whisper; default auto)
+ *   GRATIS_INFERENCE_DEVICE = auto | dml | cuda | cpu  (embeddings; default auto)
+ *   GRATIS_WHISPER_DEVICE   = auto | cuda | cpu          (Whisper; default auto)
  *   GRATIS_CUDA_AVAILABLE   = 1 | 0               (force CUDA runtime on/off)
  *   GRATIS_CPU_FLAGS        = +AVX2,+FMA3,-TSX...  (override the CPUID probe)
  *
@@ -195,27 +200,52 @@ export async function probeGpu({ env = process.env, platform = osPlatform(), run
   };
 }
 
-// AGENT: ORT provider probe — resolves onnxruntime-node FROM Transformers.js's
-// own module scope (npm may install two copies), then looks for the CUDA DLL.
-// Known finding: ORT 1.30.0 has no win32/x64 cuda12 manifest, so this is false
-// on Windows; the worker still tries CUDA and falls back cleanly.
-export function probeOnnxRuntimeCuda(fileExists = existsSync) {
+// AGENT: resolve the onnxruntime-node package root from Transformers.js's own
+// module scope (npm may install two copies). `exports` blocks './package.json',
+// so walk up from the resolved entry point until the real package.json is found.
+function onnxRuntimeRoot(fileExists = existsSync) {
+  const packageRoot = (requireFn, name) => {
+    const entry = requireFn.resolve(name);
+    let dir = join(entry, '..');
+    while (dir && dir !== join(dir, '..')) {
+      if (fileExists(join(dir, 'package.json'))) return dir;
+      dir = join(dir, '..');
+    }
+    return null;
+  };
   try {
     const require = createRequire(import.meta.url);
-    const transformersDir = join(require.resolve('@huggingface/transformers/package.json'), '..');
-    const ortRequire = createRequire(join(transformersDir, 'package.json'));
-    const ortDir = join(ortRequire.resolve('onnxruntime-node/package.json'), '..');
-    const candidates = [
-      join(ortDir, 'bin', 'napi-v6', 'win32', 'x64', 'onnxruntime_providers_cuda.dll'),
-      join(ortDir, 'bin', 'napi-v6', 'linux', 'x64', 'libonnxruntime_providers_cuda.so'),
-    ];
-    return candidates.some(fileExists);
-  } catch { return false; }
+    const transformersDir = packageRoot(require, '@huggingface/transformers');
+    if (!transformersDir) return null;
+    return packageRoot(createRequire(join(transformersDir, 'package.json')), 'onnxruntime-node');
+  } catch { return null; }
+}
+
+// AGENT: ORT provider probe — ORT 1.30.0 has no win32/x64 cuda12 manifest, so
+// this is false on Windows; the worker still falls back cleanly if forced.
+export function probeOnnxRuntimeCuda(fileExists = existsSync) {
+  const ortDir = onnxRuntimeRoot(fileExists);
+  if (!ortDir) return false;
+  return [
+    join(ortDir, 'bin', 'napi-v6', 'win32', 'x64', 'onnxruntime_providers_cuda.dll'),
+    join(ortDir, 'bin', 'napi-v6', 'linux', 'x64', 'libonnxruntime_providers_cuda.so'),
+  ].some(fileExists);
+}
+
+// AGENT: ORT DirectML probe — the bundled win32/x64 binary DOES contain
+// DirectML.dll, so this is the primary GPU backend on Windows.
+export function probeOnnxRuntimeDirectML(fileExists = existsSync) {
+  const ortDir = onnxRuntimeRoot(fileExists);
+  if (!ortDir) return false;
+  return [
+    join(ortDir, 'bin', 'napi-v6', 'win32', 'x64', 'DirectML.dll'),
+    join(ortDir, 'bin', 'napi-v6', 'win32', 'arm64', 'DirectML.dll'),
+  ].some(fileExists);
 }
 
 // AGENT: native build flags — consumed by scripts/setup-assets.mjs and written
 // to assets/runtime/native-build.json. AVX2 + FMA3 + AES-NI on; AVX-512 off.
-export function nativeBuildProfile({ platform = osPlatform(), arch = osArch(), cpu = {}, gpu = {} } = {}) {
+export function nativeBuildProfile({ platform = osPlatform(), arch = osArch(), cpu = {}, gpu = {}, directml = false } = {}) {
   const win64 = platform === 'win32' && arch === 'x64';
   return {
     target: win64 ? 'x86_64-pc-windows-msvc' : `${arch}-${platform}`,
@@ -227,6 +257,7 @@ export function nativeBuildProfile({ platform = osPlatform(), arch = osArch(), c
       avx512: false,
     },
     cuda: { enabled: !!gpu.cudaForInference, cublas: !!gpu.cudaForInference },
+    directml: { enabled: !!directml && win64 },
     flags: win64
       ? ['/arch:AVX2', '/DGRATIS_FMA3=1', '/DGRATIS_AES_NI=1', '/DGRATIS_NO_AVX512=1']
       : ['-mavx2', '-mfma', '-maes', '-mno-avx512f'],
@@ -234,22 +265,28 @@ export function nativeBuildProfile({ platform = osPlatform(), arch = osArch(), c
   };
 }
 
-// AGENT: device selection used by the embedding worker. CUDA is tried FIRST
-// whenever it is preferred; a failed CUDA load always falls through to CPU.
+// AGENT: device selection used by the embedding worker. The preferred GPU
+// backend is tried FIRST; any load/session failure falls through to the AVX2
+// CPU backend. 'dml' is the real Windows GPU path for the bundled ORT binary.
 export function deviceCandidates(hardware, override) {
   const requested = override || hardware?.inference?.preferredDevice || 'cpu';
-  return requested === 'cuda' ? ['cuda', 'cpu'] : ['cpu'];
+  return requested === 'cuda' || requested === 'dml' ? [requested, 'cpu'] : ['cpu'];
 }
 
 // AGENT: main entry point — called once at startup by src/main.cjs. Just call
 // detectHardware() and pass the returned object to MemoryEmbeddings and
 // transcribeAudio. All sub-probes are injectable for tests.
-export async function detectHardware({ env = process.env, platform = osPlatform(), arch = osArch(), run = runCommand, probeCpu, probeOrt } = {}) {
+export async function detectHardware({ env = process.env, platform = osPlatform(), arch = osArch(), run = runCommand, probeCpu, probeOrt, probeDml } = {}) {
   const cpu = await resolveCpuFlags({ env, platform, arch, model: cpus()[0]?.model, probe: probeCpu });
   const gpu = await probeGpu({ env, platform, run });
   const ortCuda = await (probeOrt || (() => Promise.resolve(probeOnnxRuntimeCuda())))();
+  const ortDirectML = await (probeDml || (() => Promise.resolve(probeOnnxRuntimeDirectML())))();
   const requested = String(env.GRATIS_INFERENCE_DEVICE || 'auto').toLowerCase();
-  const preferredDevice = requested === 'cuda' || (requested === 'auto' && gpu.cudaForInference) ? 'cuda' : 'cpu';
+  let preferredDevice;
+  if (requested === 'dml' || requested === 'cuda' || requested === 'cpu') preferredDevice = requested;
+  else if (platform === 'win32' && arch === 'x64' && gpu.available && ortDirectML) preferredDevice = 'dml';
+  else if (gpu.cudaForInference) preferredDevice = 'cuda';
+  else preferredDevice = 'cpu';
   const hardware = {
     platform, arch, cpu, gpu,
     inference: {
@@ -257,10 +294,11 @@ export async function detectHardware({ env = process.env, platform = osPlatform(
       fallbackDevice: 'cpu',
       requested,
       ortCudaAvailable: ortCuda,
+      ortDirectMLAvailable: ortDirectML,
       allowCuda: platform === 'win32' ? arch === 'x64' : true,
     },
   };
-  hardware.native = nativeBuildProfile(hardware);
+  hardware.native = nativeBuildProfile({ ...hardware, directml: ortDirectML });
   return hardware;
 }
 
@@ -273,7 +311,10 @@ export function hardwareSummary(hardware = {}) {
       name: gpu.name, vramTotalMB: gpu.vramTotalMB, vramFreeMB: gpu.vramFreeMB,
       driverVersion: gpu.driverVersion, cudaRuntimeAvailable: gpu.cudaRuntimeAvailable,
     },
-    inference: { preferredDevice: inference.preferredDevice, fallbackDevice: 'cpu', ortCudaAvailable: inference.ortCudaAvailable },
+    inference: {
+      preferredDevice: inference.preferredDevice, fallbackDevice: 'cpu',
+      ortCudaAvailable: inference.ortCudaAvailable, ortDirectMLAvailable: inference.ortDirectMLAvailable,
+    },
     native,
   };
 }
@@ -288,7 +329,10 @@ export function logHardwareCapabilities(hardware, log = console.info) {
   log(`[gratis:hardware] SIMD ${enabled} (${cpu.source || 'inferred'}; AVX-512 disabled)`);
   if (gpu.available) {
     log(`[gratis:hardware] GPU ${gpu.name} · VRAM ${gpu.vramFreeMB}/${gpu.vramTotalMB} MB free · driver ${gpu.driverVersion || 'unknown'}`);
-    log(`[gratis:hardware] CUDA runtime ${gpu.cudaRuntimeAvailable ? 'available' : 'not found'} · ORT CUDA provider ${inference.ortCudaAvailable ? 'present' : 'absent'}`);
+    if (inference.preferredDevice === 'dml')
+      log(`[gratis:hardware] DirectML (${gpu.name}) active · dedicated GPU memory used for embeddings`);
+    else
+      log(`[gratis:hardware] CUDA runtime ${gpu.cudaRuntimeAvailable ? 'available' : 'not found'} · ORT CUDA provider ${inference.ortCudaAvailable ? 'present' : 'absent'} · ORT DirectML ${inference.ortDirectMLAvailable ? 'present' : 'absent'}`);
   } else {
     log('[gratis:hardware] GPU none detected (nvidia-smi unavailable)');
   }

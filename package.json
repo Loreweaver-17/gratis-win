@@ -13,6 +13,7 @@
     "test:desktop": "node test/community-desktop.mjs",
     "test:ui": "node test/ui-polish.mjs",
     "setup:assets": "node scripts/setup-assets.mjs",
+    "setup:whisper:win": "node scripts/setup-whisper-win.mjs",
     "verify:public": "node scripts/verify-public.mjs",
     "package:mac": "node scripts/package.mjs",
     "check": "npm run verify:public && npm test",

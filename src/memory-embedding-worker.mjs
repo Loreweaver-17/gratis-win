@@ -4,11 +4,13 @@
  * from the main thread through `parentPort`.
  *
  * Device policy — DO NOT hardcode 'cpu' again:
- *   1. deviceCandidates() returns ['cuda','cpu'] when CUDA is preferred.
- *   2. Each candidate is tried in order; a failure falls through to the next.
+ *   1. deviceCandidates() returns ['dml','cpu'] on Windows (the bundled ORT has
+ *      DirectML.dll), or ['cuda','cpu'] for a CUDA-enabled ORT build.
+ *   2. Each candidate is tried in order; a session failure falls through to
+ *      the AVX2/FMA3 CPU backend instead of taking down the app.
  *   3. The chosen device and any fallback notice are posted to the parent.
- * Why: CPU was previously hardcoded, ignoring the RTX 5070 Ti. CUDA is now
- * prioritised but guarded, because a missing native provider can abort Node.
+ * Why: CPU was previously hardcoded, ignoring the RTX 5070 Ti. DirectML is the
+ * real Windows GPU path (Transformers.js whitelists dml/webgpu/cpu there).
  * Model stays `q8` (the only checksum-verified local ONNX asset available).
  */
 import {parentPort,workerData} from 'node:worker_threads';
@@ -24,7 +26,7 @@ try{
   const threads=Math.max(1,Math.min(4,(hardware?.cpu?.threads||availableParallelism()||2)-1));
   // AGENT: thread count follows the detected CPU parallelism but stays <= 4
   // so the worker does not starve the renderer / voice transcription.
-  let encoder,device,cudaFailed=false;
+  let encoder,device;const failedBackends=[];
   for(const candidate of candidates){
     try{
       encoder=await pipeline('feature-extraction',workerData.modelPath,{
@@ -34,14 +36,14 @@ try{
       device=candidate;
       break;
     }catch(error){
-      if(candidate==='cuda')cudaFailed=true;
+      failedBackends.push(candidate);
     }
   }
   // AGENT: if every device fails, post `failed` so the parent marks embeddings
   // unavailable; memory search then works without semantic vectors.
   if(!encoder)throw new Error('Meaning search is unavailable.');
   parentPort.postMessage({ready:true,device,dtype:workerData.dtype||'q8'});
-  if(device==='cpu'&&cudaFailed)parentPort.postMessage({notice:'CUDA unavailable; using AVX2 CPU inference.'});
+  if(device==='cpu'&&failedBackends.length)parentPort.postMessage({notice:`${failedBackends.join(' and ')} unavailable; using AVX2 CPU inference.`});
   let queue=Promise.resolve(),closing=false;
   parentPort.on('message',message=>{
     if(message.close){closing=true;queue=queue.finally(async()=>{await encoder.dispose();parentPort.close();});return;}

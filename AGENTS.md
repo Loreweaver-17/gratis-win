@@ -42,8 +42,8 @@ Read this file before changing anything under `src/`, `scripts/` or `test/`.
 | T3 local install/discovery | `src/t3-local.mjs` |
 | `pdftotext` discovery | `src/workspace-files.mjs` |
 | Hardware probe (CPU flags, NVIDIA driver, threads) | `src/hardware-capabilities.mjs` |
-| Whisper device/thread selection (CUDA → CPU retry) | `src/voice.mjs` |
-| Embedding worker device selection | `src/memory-embeddings.mjs`, `src/memory-embedding-worker.mjs` |
+| Whisper device/thread selection (CUDA → CPU retry), venv config | `src/voice.mjs`, `scripts/setup-whisper-win.mjs` |
+| Embedding worker device selection (DirectML → CPU on Windows) | `src/memory-embeddings.mjs`, `src/memory-embedding-worker.mjs` |
 | Windows installer packaging | `package.json` (`build`, `build:win`, `dist:win`), `scripts/make-ico.mjs`, `assets/gratis.ico` |
 
 ## External commands
@@ -71,11 +71,17 @@ await exec(binary, args, { env: childEnvironment(), timeout, maxBuffer });
 into the local-runtime consumers — do not re-probe inside them (each probe can run
 `nvidia-smi`/PowerShell).
 
-- CUDA-first, CPU fallback: Whisper uses CUDA when an NVIDIA driver is present and
-  retries the same WAV on CPU if the CUDA run fails; the embedding worker chooses
-  its execution provider from the same probe.
-- Overrides for testing and support: `GRATIS_INFERENCE_DEVICE`, `GRATIS_WHISPER_DEVICE`
-  (`auto|cuda|cpu`), `GRATIS_CUDA_AVAILABLE` (`0|1`).
+- DirectML-first, CPU fallback: on win32/x64 the embedded ONNX Runtime ships
+  `DirectML.dll` but no CUDA provider, so `Auto` selects `device:'dml'` for the
+  NVIDIA GPU and falls back to `device:'cpu'` (AVX2/FMA3) if the session fails.
+  CUDA remains available as an explicit override for custom ORT builds.
+- Whisper uses CUDA when an NVIDIA driver is present and retries the same WAV on
+  CPU if the CUDA run fails. `npm run setup:whisper:win` creates an isolated
+  CUDA-PyTorch venv and writes `<dataDir>/voice-runtime.json`; `src/voice.mjs`
+  reads that file instead of relying on global PATH.
+- Overrides for testing and support: `GRATIS_INFERENCE_DEVICE`
+  (`auto|dml|cuda|cpu`), `GRATIS_WHISPER_DEVICE` (`auto|cuda|cpu`),
+  `GRATIS_CUDA_AVAILABLE` (`0|1`).
 - AVX2 + FMA3 + AES-NI are allowed in native builds, AVX-512 is deliberately
   excluded. `npm run setup:assets` writes the profile to the git-ignored
   `assets/runtime/native-build.json`; keep it in sync with `nativeBuildProfile()`.

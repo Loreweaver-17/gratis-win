@@ -20,7 +20,7 @@ import { join } from 'node:path';
 
 const noRun = async () => { throw new Error('unavailable'); };
 const probe = async () => ({ mmx: true, sse42: true, aes: true, avx: true, avx2: true, fma3: true, tsx: true, avx512f: true });
-const base = { platform: 'win32', arch: 'x64', run: noRun, probeCpu: probe, probeOrt: async () => false };
+const base = { platform: 'win32', arch: 'x64', run: noRun, probeCpu: probe, probeOrt: async () => false, probeDml: async () => false };
 
 test('CPU flags honour overrides and never enable AVX-512', async () => {
   const caps = await detectHardware({ ...base, env: { GRATIS_CPU_FLAGS: '+AVX2,+FMA3,+AES,-TSX,AVX512F' } });
@@ -52,6 +52,24 @@ test('GPU VRAM and CUDA availability drive device preference', async () => {
   assert.match(lines.join('\n'), /AVX2\+FMA3/);
   assert.match(lines.join('\n'), /AVX-512 disabled/);
   assert.deepEqual(parseNvidiaSmi('1, GPU, 8192, 7000, 1192, 1.2'), [{ index: 1, name: 'GPU', vramTotalMB: 8192, vramFreeMB: 7000, vramUsedMB: 1192, driverVersion: '1.2' }]);
+});
+
+test('Windows selects DirectML for the RTX 5070 Ti and logs it', async () => {
+  const run = async command => {
+    if (command === 'nvidia-smi') return { stdout: '0, NVIDIA GeForce RTX 5070 Ti, 16384, 15000, 1384, 572.16\n' };
+    throw new Error('unavailable');
+  };
+  const caps = await detectHardware({ ...base, env: {}, run, probeDml: async () => true });
+  assert.equal(caps.inference.preferredDevice, 'dml');
+  assert.equal(caps.inference.ortDirectMLAvailable, true);
+  assert.equal(caps.native.directml.enabled, true);
+  assert.deepEqual(deviceCandidates(caps), ['dml', 'cpu']);
+  const lines = [];
+  logHardwareCapabilities(caps, line => lines.push(line));
+  assert.match(lines.join('\n'), /DirectML \(NVIDIA GeForce RTX 5070 Ti\) active/);
+  assert.match(lines.join('\n'), /inference dml preferred, CPU fallback/);
+  const forced = await detectHardware({ ...base, env: { GRATIS_INFERENCE_DEVICE: 'dml' }, run });
+  assert.deepEqual(deviceCandidates(forced), ['dml', 'cpu']);
 });
 
 test('missing CUDA falls back to AVX2 CPU with safe native flags', async () => {

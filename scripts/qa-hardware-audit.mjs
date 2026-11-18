@@ -17,8 +17,9 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
-import { detectHardware, hardwareSummary, logHardwareCapabilities } from '../src/hardware-capabilities.mjs';
+import { detectHardware, hardwareSummary, logHardwareCapabilities, deviceCandidates } from '../src/hardware-capabilities.mjs';
 import { findExecutable } from '../src/platform.mjs';
+import { readVoiceRuntimeConfig } from '../src/voice.mjs';
 
 const exec = promisify(execFile);
 const root = fileURLToPath(new URL('../', import.meta.url));
@@ -34,12 +35,16 @@ async function nvidia(query) {
   } catch (error) { return null; }
 }
 
-async function vramUsedMB() {
-  const out = await nvidia(['--query-gpu=memory.used', '--format=csv,noheader,nounits']);
+// One query returns both dedicated memory and SM utilization so a GPU kernel
+// that does not allocate memory can still be detected.
+async function gpuSample() {
+  const out = await nvidia(['--query-gpu=memory.used,utilization.gpu', '--format=csv,noheader,nounits']);
   if (!out) return null;
-  const values = out.split(/\r?\n/).map(line => parseFloat(line.trim())).filter(Number.isFinite);
-  return values.length ? Math.max(...values) : null;
+  const first = out.split(/\r?\n/)[0].split(',').map(value => parseFloat(value.trim()));
+  return { memoryMB: Number.isFinite(first[0]) ? first[0] : null, utilization: Number.isFinite(first[1]) ? first[1] : null };
 }
+
+async function vramUsedMB() { return (await gpuSample())?.memoryMB ?? null; }
 
 async function computeApps() {
   return nvidia(['--query-compute-apps=pid,process_name,used_gpu_memory', '--format=csv,noheader']);
@@ -77,14 +82,19 @@ try {
   const modelPath = join(root, 'assets', 'models', 'sentence-encoder') + (process.platform === 'win32' ? '\\' : '/');
   const baseline = await vramUsedMB();
   let sampling = true;
-  const samples = [];
-  const sampler = (async () => { while (sampling) { const used = await vramUsedMB(); if (used !== null) samples.push(used); await delay(300); } })();
+  const samples = [], utilizations = [];
+  const sampler = (async () => {
+    while (sampling) {
+      const sample = await gpuSample();
+      if (sample?.memoryMB !== null && sample?.memoryMB !== undefined) samples.push(sample.memoryMB);
+      if (sample?.utilization !== null && sample?.utilization !== undefined) utilizations.push(sample.utilization);
+      await delay(300);
+    }
+  })();
 
-  const preferred = hardware.inference.preferredDevice;
-  // Mirror the app worker: try CUDA first, then exercise the real AVX2/FMA3
-  // CPU fallback. Transformers.js on win32 only accepts dml/webgpu/cpu, so the
-  // CUDA attempt can fail with a JS error before any native code is loaded.
-  const candidates = preferred === 'cuda' ? ['cuda', 'cpu'] : ['cpu'];
+  // Use the exact same order as the production embedding worker. On Windows
+  // this is ['dml','cpu']; the CPU leg still exercises AVX2/FMA3 for SIGILL.
+  const candidates = deviceCandidates(hardware);
   const deviceAttempts = [], successfulDevices = [];
   const runs = [];
   for (let i = 0; i < childrenCount; i++) {
@@ -105,21 +115,36 @@ try {
   const failures = runs.filter(run => !run.ok);
   report.sigill = {
     passed: failures.length === 0 && !deviceAttempts.some(a => illegalInstruction(a.code) || illegalInstruction(a.signal)),
-    children: childrenCount, iterationsPerChild: iterations, preferred,
+    children: childrenCount, iterationsPerChild: iterations, preferred: hardware.inference.preferredDevice,
     deviceAttempts,
     illegalInstructions: deviceAttempts.filter(a => illegalInstruction(a.code) || illegalInstruction(a.signal)),
     failures: failures.map(f => ({ code: f.code, signal: f.signal, spawnError: f.spawnError, stderr: f.stderr })),
   };
   const device = successfulDevices[0] || preferred;
   const peak = samples.length ? Math.max(...samples) : null;
+  const peakUtilization = utilizations.length ? Math.max(...utilizations) : null;
   report.vram = {
     baselineMB: baseline, peakMB: peak, deltaMB: baseline !== null && peak !== null ? peak - baseline : null,
+    peakUtilizationPercent: peakUtilization,
     computeApps: await computeApps(), samples: samples.length,
     device,
   };
 
-  const whisper = await findExecutable('whisper');
-  report.whisper = { found: Boolean(whisper), path: whisper };
+  const dataDir = process.env.GRATIS_DATA_DIR || (process.env.APPDATA ? join(process.env.APPDATA, 'Gratis Core', 'data') : join(root, 'data'));
+  const voiceConfig = await readVoiceRuntimeConfig(dataDir);
+  const whisper = voiceConfig?.whisper || await findExecutable('whisper');
+  let cudaAvailable = null, cudaDevice = null;
+  if (voiceConfig?.python) {
+    try {
+      const { stdout } = await exec(voiceConfig.python, ['-c', 'import torch; print(torch.cuda.is_available()); print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else "none")'], { timeout: 120000, windowsHide: true });
+      const lines = stdout.trim().split(/\r?\n/);
+      cudaAvailable = lines[0]?.trim() === 'True'; cudaDevice = lines[1]?.trim() || null;
+    } catch (error) { cudaDevice = String(error.message).slice(0, 500); }
+  }
+  report.whisper = {
+    found: Boolean(whisper), path: whisper, configured: Boolean(voiceConfig?.whisper),
+    device: voiceConfig?.device || null, cudaAvailable, cudaDevice,
+  };
   if (whisper) {
     try {
       const { stdout } = await exec(whisper, ['--version'], { timeout: 15000, windowsHide: true });
@@ -127,8 +152,10 @@ try {
     } catch (error) { report.whisper.versionError = String(error.stack || error).slice(0, 2000); }
   }
 
+  const gpuActive = device === 'dml' || device === 'cuda';
+  const usedGpu = (report.vram.deltaMB ?? 0) > 0 || (report.vram.peakUtilizationPercent ?? 0) > 0;
   if (failures.length) report.verdict = 'FAIL';
-  else if (device !== 'cuda' || (report.vram.deltaMB ?? 0) <= 0) report.verdict = 'FAIL_GPU_NOT_USED';
+  else if (!gpuActive || !usedGpu) report.verdict = 'FAIL_GPU_NOT_USED';
 } catch (error) {
   report.verdict = 'ERROR';
   report.error = String(error.stack || error);
@@ -137,6 +164,9 @@ try {
   console.log('\n[a report] ' + JSON.stringify({
     verdict: report.verdict, sigill: report.sigill?.passed, device: report.sigill?.device,
     vramBaselineMB: report.vram?.baselineMB, vramPeakMB: report.vram?.peakMB,
-    whisperFound: report.whisper?.found, error: report.error,
+    peakGpuUtilizationPercent: report.vram?.peakUtilizationPercent,
+    whisperFound: report.whisper?.found, whisperConfigured: report.whisper?.configured,
+    whisperCuda: report.whisper?.cudaAvailable, whisperDevice: report.whisper?.cudaDevice,
+    error: report.error,
   }, null, 2));
 }
