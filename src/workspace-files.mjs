@@ -4,6 +4,7 @@ import {join,resolve,relative,isAbsolute,basename} from 'node:path';
 import {createHash,randomUUID} from 'node:crypto';
 import {execFile} from 'node:child_process';
 import {promisify} from 'node:util';
+import {findExecutable} from './platform.mjs';
 const execute=promisify(execFile);
 export class WorkspaceFiles {
   constructor(directory,{maxBytes=100000000,maxFiles=1000}={}){this.directory=directory;this.maxBytes=maxBytes;this.maxFiles=maxFiles;this.writes=new Map();}
@@ -20,7 +21,7 @@ export class WorkspaceFiles {
     if(mime){if(size>4500000)throw new Error('Use an image smaller than 4.5 MB.');return {content:[{type:'image',mimeType:mime,data:(await readFile(target)).toString('base64')}]};}
     if(/\.pdf$/i.test(path)){
       if(size>20000000)throw new Error('Use a PDF smaller than 20 MB.');
-      let binary;for(const candidate of ['/opt/homebrew/bin/pdftotext','/usr/local/bin/pdftotext','/usr/bin/pdftotext']){try{await stat(candidate);binary=candidate;break;}catch{}}
+      let binary=await findExecutable('pdftotext',{extraDirectories:process.platform==='win32'?[]:['/opt/homebrew/bin','/usr/local/bin','/usr/bin']});
       if(!binary)throw new Error('PDF text extraction is unavailable. Attach a text version of this document.');
       const {stdout}=await execute(binary,['-layout','-f','1','-l','100',target,'-'],{timeout:15000,maxBuffer:2000000});return {content:[{type:'text',text:stdout.slice(0,180000)||'No selectable text was found in this PDF.'}]};
     }

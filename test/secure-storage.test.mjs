@@ -28,3 +28,21 @@ test('an explicit fresh process can retry and memory preserves key rotation meta
 test('Linux plaintext fallback is rejected before or after provider initialization',async()=>{
  for(const mode of ['before','after']){let unlocks=0,writes=0;const access=createSecureStorageAccess({getSelectedStorageBackend:()=>mode==='before'||unlocks?'basic_text':'unknown',isAsyncEncryptionAvailable:async()=>{unlocks++;return true;},encryptStringAsync:async()=>writes++},{platform:'linux'});await assert.rejects(access.encrypt('secret'),/locked/);assert.equal(writes,0);}
 });
+test('Windows DPAPI storage uses the synchronous safeStorage API when async encryption is unavailable',async()=>{
+ let writes=0,reads=0;
+ const storage={isAsyncEncryptionAvailable:()=>false,isEncryptionAvailable:()=>true,
+  encryptString:text=>{writes++;return Buffer.from('dpapi:'+text);},
+  decryptString:bytes=>{reads++;return bytes.toString().slice(6);}};
+ const access=createSecureStorageAccess(storage,{platform:'win32'});
+ const encrypted=await access.encrypt('credential');
+ assert.ok(Buffer.isBuffer(encrypted));
+ assert.equal(await access.decrypt(encrypted),'credential');
+ assert.equal(await access.decrypt(await access.keyring.wrapKey('memory key')),'memory key');
+ assert.deepEqual(await access.keyring.unwrapKey(await access.keyring.wrapKey('vault key')),{value:'vault key',rewrap:false});
+ assert.equal(writes,3);assert.equal(reads,3);assert.equal(access.locked,false);
+});
+test('Windows without a usable secure store fails closed instead of writing plaintext',async()=>{
+ const access=createSecureStorageAccess({isAsyncEncryptionAvailable:()=>false,isEncryptionAvailable:()=>false},{platform:'win32'});
+ await assert.rejects(access.encrypt('secret'),error=>error.code==='GRATIS_STORAGE_LOCKED'&&/Credential Manager/.test(error.message));
+ assert.equal(access.locked,true);
+});

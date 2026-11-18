@@ -4,7 +4,7 @@ Before installing, read the [installation and use notice](../DISCLAIMER.md). Rev
 
 ## 1. Install and launch
 
-For an app installer, use [Gratis Core 0.4.2 downloads](https://github.com/promptadvisers/gratis/releases/tag/v0.4.2) and drag Gratis Core to Applications. For source development, use a Mac with Apple Silicon or Intel, Node.js 22+ and npm. Clone the repository and run the four commands in the main README. `npm run setup:assets` downloads a fixed revision of the semantic memory encoder and a fixed Composio CLI release, verifies checksums, and installs them only inside this checkout. It does not copy your account configuration or sign you in.
+For an app installer, use [Gratis Core 0.4.2 downloads](https://github.com/promptadvisers/gratis/releases/tag/v0.4.2) and drag Gratis Core to Applications. For source development, use Windows 11, macOS (Apple Silicon or Intel) or Linux with Node.js 22+ and npm. Clone the repository and run the four commands in the main README. `npm run setup:assets` downloads a fixed revision of the semantic memory encoder and, where Composio publishes a build for your platform, a fixed Composio CLI release. It verifies checksums and installs them only inside this checkout using Node.js — no `unzip` or POSIX shell is required.
 
 `npm start` opens **Gratis Core**. This edition uses its own local app data folder, separate from other editions. A fresh checkout starts with an empty demo conversation.
 
@@ -29,7 +29,7 @@ Create a group with two or more bots. The first bot coordinates the work. Most m
 
 ## 5. Add recurring work
 
-Open **+ → Scheduled tasks**, or ask: “Every weekday at 9 AM America/Toronto, summarize the open questions in this conversation.” Check the saved task, timezone and next run. Keep the Mac awake and Gratis running. You can pause, edit, delete or run the task now.
+Open **+ → Scheduled tasks**, or ask: “Every weekday at 9 AM America/Toronto, summarize the open questions in this conversation.” Check the saved task, timezone and next run. Keep the computer awake and Gratis running. You can pause, edit, delete or run the task now.
 
 ![A scheduled task using synthetic instructions](screenshots/core-schedules.png)
 

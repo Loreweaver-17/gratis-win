@@ -2,6 +2,8 @@
 
 [Gratis Core 0.4.2 preview](https://github.com/promptadvisers/gratis/releases/tag/v0.4.2) contains the Keychain and button fixes. Choose the .dmg matching your Mac: arm64 for Apple Silicon, x64 for Intel. The source archives are for developers.
 
+The published installers are macOS-only. On Windows 11 and Linux, run the app from source with Node.js 22+ as described in the [quickstart](QUICKSTART.md). The Windows and Linux builds keep enabled scheduled tasks running from the notification area after the window is closed; quit from its icon to stop them.
+
 Open the DMG and drag Gratis Core into Applications. Quit the previous app before replacing it. Your local Gratis Core data folder is separate from the application bundle and is retained when replacing the app.
 
 The release is built from the public core repository on separate native Mac runners. Each DMG is mounted, its app identity and signature are checked, and its packaged UI, Slack, secure-storage compatibility and dialog controls are tested using isolated temporary profiles.

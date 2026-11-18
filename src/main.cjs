@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, nativeTheme, Menu, systemPreferences, shell, clipboard, safeStorage } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, nativeTheme, Menu, Tray, nativeImage, systemPreferences, shell, clipboard, safeStorage } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs/promises');
 const { constants } = require('node:fs');
@@ -6,6 +6,9 @@ const { pathToFileURL } = require('node:url');
 
 const edition=require('../edition.json');
 app.setName(edition.name);
+// Windows uses this identity for taskbar grouping and notification banners.
+if (process.platform === 'win32') app.setAppUserModelId(edition.bundleId);
+const iconPath = path.join(__dirname, '../assets/gratis-icon.png');
 const dataOverride = process.env.GRATIS_DATA_DIR;
 const dataDir = dataOverride || (app.isPackaged
   ? path.join(app.getPath('appData'), edition.dataFolder, 'data') : path.resolve(__dirname, '../data'));
@@ -18,11 +21,65 @@ const controlState=value=>({...value,control:humanComputers.has(value.conversati
 const computerSnapshot=id=>{const snapshot=cloud.snapshot(id);return {...snapshot,state:controlState(snapshot.state)};};
 let messaging,messagingStartupError,secureStorageAccess;
 let releaseDataLock, window, service, connections, files, cloud, signIn, memory, t3Connection, t3Tasks, t3Host, schedules, closing = false, finishDraftFlush, voiceTask;
-app.on('activate',()=>{if(window&&!window.isDestroyed()){window.show();window.focus();}});
-app.on('second-instance', () => { if (window && !window.isDestroyed()) { window.show(); window.focus(); } });
+// Windows 11 and Linux keep scheduled work alive in the notification area.
+// macOS keeps its existing Dock behaviour.
+let tray = null, trayTimer = null, trayHintShown = false;
+const hasEnabledSchedules = () => Boolean(schedules?.items?.some(item => item.enabled));
+const reusableWindow = () => window && !window.isDestroyed();
+function showWindow(){ if(!reusableWindow())return; if(window.isMinimized())window.restore(); window.show(); window.focus(); }
+function traySummary(){
+  const active = schedules?.items?.filter(item => item.enabled) ?? [];
+  if(!active.length)return 'No scheduled tasks';
+  const next = Math.min(...active.map(item => item.nextRunAt).filter(Number.isFinite));
+  return `${active.length} scheduled ${active.length === 1 ? 'task' : 'tasks'}${Number.isFinite(next) ? ` · next ${new Date(next).toLocaleString()}` : ''}`;
+}
+function refreshTray(){
+  if(!tray)return;
+  const active = schedules?.items?.filter(item => item.enabled).length ?? 0;
+  tray.setToolTip(active ? `${edition.name} · ${active} scheduled ${active === 1 ? 'task' : 'tasks'} enabled` : `${edition.name} · running in the notification area`);
+  tray.setContextMenu(Menu.buildFromTemplate([
+    { label: `Open ${edition.name}`, click: showWindow },
+    { label: traySummary(), enabled: false },
+    { type: 'separator' },
+    { label: `Quit ${edition.name}`, click: () => void shutdown() },
+  ]));
+}
+function createTray(){
+  if(process.platform === 'darwin' || tray)return tray;
+  try{
+    const image = nativeImage.createFromPath(iconPath);
+    if(image.isEmpty())return null;
+    tray = new Tray(image.resize({ width: 32, height: 32 }));
+    tray.on('click', showWindow);
+    tray.on('double-click', showWindow);
+    refreshTray();
+    trayTimer = setInterval(refreshTray, 60000);
+    trayTimer.unref?.();
+  }catch(error){
+    // A missing notification area (some headless sessions) must not stop the app.
+    console.error('Notification area icon unavailable:', error.message);
+    tray = null;
+  }
+  return tray;
+}
+function hideToTray(){
+  if(!reusableWindow())return;
+  window.hide();
+  if(process.platform === 'win32' && tray && !trayHintShown){
+    trayHintShown = true;
+    try { tray.displayBalloon({ title: edition.name, content: 'Still running in the notification area so scheduled tasks can finish. Right-click the icon to quit.' }); } catch {}
+  }
+}
+// Hiding is only safe when the window can be reopened: the Dock on macOS, the
+// notification area elsewhere.
+const canKeepRunningInBackground = () => hasEnabledSchedules() && (process.platform === 'darwin' || Boolean(tray));
+app.on('activate',()=>showWindow());
+app.on('second-instance', showWindow);
 async function shutdown() {
   if (closing) return;
   closing = true;
+  clearInterval(trayTimer); trayTimer = null;
+  tray?.destroy(); tray = null;
   if (window && !window.isDestroyed()) {
     await new Promise(resolve => {
       const timer = setTimeout(resolve, 2000);
@@ -87,7 +144,7 @@ app.whenReady().then(async () => {
   await service.init();
   await (await import('./edition-setup.mjs')).applyEdition(service,edition);
   const {Schedules}=await import('./schedules.mjs');
-  schedules=await new Schedules({directory:dataDir,encrypt:connections.encrypt,decrypt:connections.decrypt,service,onChange:()=>{if(window&&!window.isDestroyed())window.webContents.send('orbit:schedules-changed');}}).init();
+  schedules=await new Schedules({directory:dataDir,encrypt:connections.encrypt,decrypt:connections.decrypt,service,onChange:()=>{if(window&&!window.isDestroyed())window.webContents.send('orbit:schedules-changed');refreshTray();}}).init();
   schedules.start();
   t3Tasks.start();
   try{const {MessagingRouter}=await import('./messaging-router.mjs');messaging=await new MessagingRouter({directory:dataDir,encrypt:connections.encrypt,decrypt:connections.decrypt,service,onChange:()=>{if(window&&!window.isDestroyed())window.webContents.send('orbit:slack-changed');}}).init();}catch{messagingStartupError='Saved Slack settings could not be opened. Existing data was preserved.';}
@@ -98,10 +155,21 @@ app.whenReady().then(async () => {
       await service.updateBot({ id: primary.id, name: 'Gratis' });
   }
   if(secureStorageAccess.locked)throw new Error('Secure storage is locked.');
-  window = new BrowserWindow({ width: 1496, height: 938, minWidth: 512, minHeight: 520, show: false,
-    title: edition.name, backgroundColor: '#121212', titleBarStyle: 'hiddenInset', trafficLightPosition: { x:16,y:15 },
+  const windowOptions = { width: 1496, height: 938, minWidth: 512, minHeight: 520, show: false,
+    title: edition.name, backgroundColor: '#121212',
     webPreferences: { preload: path.join(__dirname, 'preload.cjs'),
-      contextIsolation: true, nodeIntegration: false, sandbox: true } });
+      contextIsolation: true, nodeIntegration: false, sandbox: true } };
+  if (process.platform === 'darwin') {
+    // Inset traffic lights sit over the custom toolbar.
+    windowOptions.titleBarStyle = 'hiddenInset';
+    windowOptions.trafficLightPosition = { x:16,y:15 };
+  } else {
+    // Windows 11 keeps the native caption (Snap Layouts, system menu) and
+    // hides the application menu unless the user presses Alt.
+    windowOptions.icon = iconPath;
+    windowOptions.autoHideMenuBar = true;
+  }
+  window = new BrowserWindow(windowOptions);
   let workspaceFullscreen=false,priorFullscreen=false,priorSimpleFullscreen=false;
   function setWorkspaceFullscreen(enabled){
     if(enabled===workspaceFullscreen)return enabled;
@@ -116,7 +184,12 @@ app.whenReady().then(async () => {
   ipcMain.handle('orbit:edition',e=>{authorized(e);return {id:edition.id,name:edition.name,version:app.getVersion(),platform:process.platform,arch:process.arch};});
   ipcMain.handle('orbit:workspace-fullscreen',(e,enabled)=>{authorized(e);if(typeof enabled!=='boolean')throw new Error('Invalid fullscreen mode.');return setWorkspaceFullscreen(enabled);});
   window.webContents.on('before-input-event',(event,input)=>{if(workspaceFullscreen&&input.type==='keyDown'&&['Escape','Esc'].includes(input.key)){event.preventDefault();setWorkspaceFullscreen(false);}});
-  window.on('close', e => { e.preventDefault(); if(schedules.items.some(i=>i.enabled)){window.hide();}else void shutdown(); });
+  window.on('close', e => { e.preventDefault(); if(canKeepRunningInBackground()){hideToTray();}else void shutdown(); });
+  // Standard Windows 11 minimize-to-tray: background schedules keep running
+  // and the notification-area icon brings the window back.
+  window.on('minimize', () => { if(process.platform === 'win32' && canKeepRunningInBackground()) setImmediate(hideToTray); });
+  window.on('show', refreshTray);
+  createTray();
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   const pageURL = pathToFileURL(path.join(__dirname, 'index.html')).href;
   window.webContents.on('will-navigate', (e, url) => { if (url !== pageURL) e.preventDefault(); });
@@ -277,20 +350,31 @@ app.whenReady().then(async () => {
   });
   nativeTheme.on('updated', () => { if (!window.isDestroyed()) window.webContents.send('orbit:theme', nativeTheme.shouldUseDarkColors); });
   ipcMain.handle('orbit:theme', e => { authorized(e); return nativeTheme.shouldUseDarkColors; });
-  Menu.setApplicationMenu(Menu.buildFromTemplate([
-    { label: edition.name, submenu: [{ role: 'about' }, { type: 'separator' }, { role: 'quit' }] },
-    { label: 'Edit', submenu: [{ role: 'undo' }, { role: 'redo' }, { type: 'separator' }, { role: 'cut' }, { role: 'copy' }, { role: 'paste' }, { role: 'selectAll' }] },
-    { label: 'View', submenu: [{ role: 'reload' }, { role: 'resetZoom' }, { role: 'zoomIn' }, { role: 'zoomOut' }, { role: 'togglefullscreen' }] }
-  ]));
-  await window.loadURL(pageURL);
+  const editMenu = { label: 'Edit', submenu: [{ role: 'undo' }, { role: 'redo' }, { type: 'separator' }, { role: 'cut' }, { role: 'copy' }, { role: 'paste' }, { role: 'selectAll' }] };
+  const viewMenu = { label: 'View', submenu: [{ role: 'reload' }, { role: 'resetZoom' }, { role: 'zoomIn' }, { role: 'zoomOut' }, { role: 'togglefullscreen' }] };
+  const menuTemplate = process.platform === 'darwin'
+    ? [{ label: edition.name, submenu: [{ role: 'about' }, { type: 'separator' }, { role: 'hide' }, { role: 'hideOthers' }, { type: 'separator' }, { role: 'quit' }] }, editMenu, viewMenu, { role: 'windowMenu' }]
+    : [{ label: 'File', submenu: [
+        { label: 'Hide to notification area', enabled: Boolean(tray), click: hideToTray },
+        { label: 'Show window', click: showWindow },
+        { type: 'separator' },
+        { label: `Quit ${edition.name}`, accelerator: 'Ctrl+Q', click: () => void shutdown() },
+      ] }, editMenu, viewMenu];
+  Menu.setApplicationMenu(Menu.buildFromTemplate(menuTemplate));
+  // A login-free reload or a superseded navigation aborts the first load.
+  // That is not a fatal startup error, so only real failures reach the dialog.
+  await window.loadURL(pageURL).catch(error => { if (error.code !== 'ERR_ABORTED') throw error; });
   window.webContents.setZoomFactor(1.2);
   if (process.env.GRATIS_TEST_HIDDEN !== '1') window.show();
 }).catch(async error => {
   await releaseDataLock?.();console.error(error);
-  if(secureStorageAccess?.locked){const {response}=await dialog.showMessageBox({type:'warning',title:'Gratis is locked',message:'Secure storage could not be opened.',detail:'Your chats, settings and encrypted credentials have not been reset. Unlock your operating-system keychain, then choose Try again. Gratis will not keep asking in the background.',buttons:['Quit','Try again'],defaultId:0,cancelId:0});if(response===1)app.relaunch();}
+  if(secureStorageAccess?.locked){const {response}=await dialog.showMessageBox({type:'warning',title:'Gratis is locked',message:'Secure storage could not be opened.',detail:'Your chats, settings and encrypted credentials have not been reset. Unlock your operating-system credential store, then choose Try again. Gratis will not keep asking in the background.',buttons:['Quit','Try again'],defaultId:0,cancelId:0});if(response===1)app.relaunch();}
   else dialog.showErrorBox('Gratis could not start', error.message);
   app.exit(1);
 });
+// The close handler hides instead of destroying the window, so this only runs
+// when the last window is really gone. Quitting then avoids leaving a tray icon
+// with no window behind it.
 app.on('window-all-closed', () => app.quit());
 app.on('before-quit', e => {
   if (closing || !service) return;

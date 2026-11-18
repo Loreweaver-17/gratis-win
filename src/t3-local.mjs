@@ -3,12 +3,18 @@ import {join} from 'node:path';
 import {homedir} from 'node:os';
 import {execFile} from 'node:child_process';
 import {promisify} from 'node:util';
+import {findExecutable,isWindows} from './platform.mjs';
 const exec=promisify(execFile);
 export class T3LocalHost {
  constructor({home,installer,execute=exec,onProgress=()=>{}}){Object.assign(this,{home,installer,execute,onProgress});this.pending=null;}
  async running(){for(const home of [this.home,join(homedir(),'.t3')]){try{const state=JSON.parse(await readFile(join(home,'userdata/server-runtime.json'),'utf8'));if(!Number.isInteger(state.pid)||state.pid<1)continue;process.kill(state.pid,0);const url=new URL(state.origin);if(!['127.0.0.1','localhost','[::1]'].includes(url.hostname))continue;return{endpoint:url.origin+'/mcp',home,owned:home===this.home,version:state.serverVersion};}catch{}}return null;}
  async setup(){if(this.pending)return this.pending;this.pending=this.install().finally(()=>{this.pending=null;});return this.pending;}
- async binary(host){for(const candidate of [join(host.home,'bin/t3'),join(homedir(),'.local/bin/t3'),'/opt/homebrew/bin/t3','/usr/local/bin/t3']){try{await access(candidate);return candidate;}catch{}}throw new Error('The T3 command could not be found on this Mac.');}
+ async binary(host){
+  const extraDirectories=[join(host.home,'bin'),join(homedir(),'.local','bin'),...(isWindows?[]:['/opt/homebrew/bin','/usr/local/bin'])];
+  const found=await findExecutable('t3',{extraDirectories});
+  if(!found)throw new Error('The T3 command could not be found. Install T3, or connect a T3 environment using its address.');
+  return found;
+ }
  async registerProject(host,folder){await this.execute(await this.binary(host),['project','add','--base-dir',host.home,folder],{env:{...process.env,T3CODE_HOME:host.home},timeout:30000,maxBuffer:100000});}
  async browserLink(host,threadId){
   const {stdout}=await this.execute(await this.binary(host),['auth','pairing','create','--base-dir',host.home,'--scope','orchestration:read','--scope','orchestration:operate','--scope','filesystem:read','--scope','preview:operate','--ttl','5m','--label','Gratis browser handoff','--json'],{env:{...process.env,T3CODE_HOME:host.home},timeout:20000,maxBuffer:100000});
@@ -23,7 +29,8 @@ export class T3LocalHost {
  }
  async install(){
   const running=await this.running();if(running)return running;
-  const binary=join(this.home,'bin/t3'),env={...process.env,T3CODE_HOME:this.home,T3CODE_VERSION:'0.1.7',T3CODE_INSTALL_BIN_DIR:join(this.home,'bin')};
+  if(isWindows)throw new Error('Automatic local T3 setup is not available on Windows. Connect a T3 environment using its address.');
+  const binary=join(this.home,'bin','t3'),env={...process.env,T3CODE_HOME:this.home,T3CODE_VERSION:'0.1.7',T3CODE_INSTALL_BIN_DIR:join(this.home,'bin')};
   try{await access(binary);}catch{
    this.onProgress('Downloading and verifying T3…');await mkdir(this.home,{recursive:true,mode:0o700});const script=join(this.home,'install-t3.sh');await writeFile(script,await readFile(this.installer),{mode:0o700});
    try{await this.execute('/bin/sh',[script],{env,timeout:300000,maxBuffer:1000000});}finally{await rm(script,{force:true});}

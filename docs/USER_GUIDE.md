@@ -26,7 +26,7 @@ Composio sign-in and per-service authorization are optional. You can disconnect 
 
 ## Computer and takeover
 
-With your own cloud backend configured, the Computer pane shows the bot's browser. Drag the divider to resize it, or expand it. Take control to use its mouse and keyboard; Give control back resumes unfinished work from a fresh view of the page. Save important files before stopping the computer. This computer is separate from the Mac running Gratis.
+With your own cloud backend configured, the Computer pane shows the bot's browser. Drag the divider to resize it, or expand it. Take control to use its mouse and keyboard; Give control back resumes unfinished work from a fresh view of the page. Save important files before stopping the computer. This computer is separate from the machine running Gratis.
 
 ## T3 project tasks
 

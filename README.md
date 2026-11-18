@@ -67,7 +67,7 @@ For the details that matter before installing, start with the [five-minute guide
 
 ## Practical limits
 
-Scheduled tasks require Gratis running and the Mac awake. Closing the window keeps enabled schedules active; explicitly quitting stops execution until reopen. A missed period becomes one fresh check, not a backlog. External changes can wait for approval.
+Scheduled tasks require Gratis running and the computer awake. Closing the window keeps enabled schedules active; explicitly quitting stops execution until reopen. On Windows and Linux the app keeps running in the notification area while schedules are enabled, and the tray icon reopens the window. A missed period becomes one fresh check, not a backlog. External changes can wait for approval.
 
 Cloud browsing is optional, runs in your own infrastructure, and may incur hosting costs. T3 tasks use the permissions and machine availability of your own T3 environment. Neither service is preconnected.
 

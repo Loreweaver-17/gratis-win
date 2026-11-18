@@ -3,6 +3,7 @@ import {join} from 'node:path';
 import {randomUUID} from 'node:crypto';
 import {execFile} from 'node:child_process';
 import {promisify} from 'node:util';
+import {childEnvironment,withExecutableExtension} from './platform.mjs';
 const exec=promisify(execFile);
 const message=error=>error.code==='ENOENT'?'Composio did not finish preparing your account. Retry connection to continue, or cancel sign-in to start again.':String(error.message||error).replace(/(?:uak_|ak_|ck_|gsk_)[\w-]+/g,'[redacted]').replace(/https?:\/\/\S+/g,'[sign-in URL]').slice(0,400);
 const savedFiles=['user_data.json','config.json','.composio/project.json','.env.local'];
@@ -12,10 +13,10 @@ const keyFromEnv=source=>{const entry=source.split(/\r?\n/).find(line=>/^\s*(?:e
 // Use Composio's supported browser sign-in flow in an app-private cache.
 // CLI output and cached credentials never cross the renderer boundary.
 export class ComposioSignIn {
-  constructor({directory,binary,connections,openExternal,onState=()=>{},execute=exec,request=fetch}){Object.assign(this,{directory,binary,connections,openExternal,onState,execute,request});this.current={status:'idle'};this.job=null;this.recovery=join(directory,'composio-signin.secure');}
+  constructor({directory,binary,connections,openExternal,onState=()=>{},execute=exec,request=fetch}){Object.assign(this,{directory,binary:withExecutableExtension(binary),connections,openExternal,onState,execute,request});this.current={status:'idle'};this.job=null;this.recovery=join(directory,'composio-signin.secure');}
   state(){return this.current;}
   update(status,error){this.current={status,...(error?{error}:{}),updatedAt:Date.now()};this.onState(this.current);return this.current;}
-  async command(job,args,timeout=30000){const env={HOME:process.env.HOME,USER:process.env.USER,PATH:process.env.PATH,TMPDIR:process.env.TMPDIR,LANG:process.env.LANG||'en_US.UTF-8',COMPOSIO_CACHE_DIR:job.cache};return this.execute(this.binary,args,{cwd:job.cache,env,signal:job.controller.signal,timeout,maxBuffer:1000000});}
+  async command(job,args,timeout=30000){const env={...childEnvironment(),COMPOSIO_CACHE_DIR:job.cache};return this.execute(this.binary,args,{cwd:job.cache,env,signal:job.controller.signal,timeout,maxBuffer:1000000});}
   async checkpoint(job){
     if(!this.connections.encrypt)return;
     const files={};for(const name of savedFiles){try{files[name]=await readFile(join(job.cache,name),'utf8');}catch(error){if(error.code!=='ENOENT')throw error;}}
@@ -30,7 +31,14 @@ export class ComposioSignIn {
   }
   async start(){
     if(this.job)return this.state();
-    await access(this.binary);const cache=join(this.directory,'composio-signin',randomUUID());await mkdir(cache,{recursive:true,mode:0o700});
+    try{await access(this.binary);}catch{
+      // Composio does not publish a Windows CLI in this release, so point the
+      // person at the manual key path instead of a bare ENOENT.
+      throw new Error(process.platform==='win32'
+        ?'Composio browser sign-in is not available on Windows. Add a Composio project key in Settings -> Advanced.'
+        :'The Composio sign-in helper is missing. Run npm run setup:assets, then retry.');
+    }
+    const cache=join(this.directory,'composio-signin',randomUUID());await mkdir(cache,{recursive:true,mode:0o700});
     const job={cache,controller:new AbortController(),url:null,promise:null};this.job=job;this.update('opening');
     try{
       if(await this.restore(job)){this.update('configuring');job.promise=this.finish(job,true);return this.state();}

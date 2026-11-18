@@ -1,17 +1,19 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtemp,rm,symlink} from 'node:fs/promises';
+import {mkdtemp,rm,symlink,writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {randomUUID} from 'node:crypto';
 import {WorkspaceFiles} from '../src/workspace-files.mjs';
 import {Connections} from '../src/connections.mjs';
 import {ChatService} from '../src/chat-service.mjs';
+// Windows only allows symlinks in Developer Mode or an elevated shell.
+const symlinkSupport=await (async()=>{const d=await mkdtemp(join(tmpdir(),'gratis-symlink-'));try{await writeFile(join(d,'target'),'x');await symlink(join(d,'target'),join(d,'link'));return true;}catch{return false;}finally{await rm(d,{recursive:true,force:true});}})();
 test('bot files are isolated, persisted, bounded, and reject traversal and symlinks',async t=>{
  const dir=await mkdtemp(join(tmpdir(),'gratis-files-'));t.after(()=>rm(dir,{recursive:true,force:true}));const files=new WorkspaceFiles(dir),a=randomUUID(),b=randomUUID();
  await files.write(a,'notes/work.md','Saved note');assert.equal(await files.read(a,'notes/work.md'),'Saved note');assert.equal((await files.list(b)).length,0);
  for(const path of ['../other','/etc/passwd','.secret/key','ok/../../out'])await assert.rejects(files.write(a,path,'bad'));
- await symlink(tmpdir(),join(files.root(a),'escape'));await assert.rejects(files.write(a,'escape/out','bad'),/symlink/);
+ if(symlinkSupport){await symlink(tmpdir(),join(files.root(a),'escape'));await assert.rejects(files.write(a,'escape/out','bad'),/symlink/);}else t.diagnostic('symlink check skipped: this account cannot create symlinks');
  await assert.rejects(files.write(a,'big.txt','x'.repeat(200001)),/200 KB/);
 });
 test('connection snapshots never include secrets and encrypted settings survive restart',async t=>{
