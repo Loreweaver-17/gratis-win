@@ -3,6 +3,7 @@ const path = require('node:path');
 const fs = require('node:fs/promises');
 const { constants } = require('node:fs');
 const { pathToFileURL } = require('node:url');
+const trayLifecycle = require('./tray-lifecycle.cjs');
 
 const edition=require('../edition.json');
 app.setName(edition.name);
@@ -24,25 +25,15 @@ let releaseDataLock, window, service, connections, files, cloud, signIn, memory,
 // Windows 11 and Linux keep scheduled work alive in the notification area.
 // macOS keeps its existing Dock behaviour.
 let tray = null, trayTimer = null, trayHintShown = false;
-const hasEnabledSchedules = () => Boolean(schedules?.items?.some(item => item.enabled));
 const reusableWindow = () => window && !window.isDestroyed();
 function showWindow(){ if(!reusableWindow())return; if(window.isMinimized())window.restore(); window.show(); window.focus(); }
-function traySummary(){
-  const active = schedules?.items?.filter(item => item.enabled) ?? [];
-  if(!active.length)return 'No scheduled tasks';
-  const next = Math.min(...active.map(item => item.nextRunAt).filter(Number.isFinite));
-  return `${active.length} scheduled ${active.length === 1 ? 'task' : 'tasks'}${Number.isFinite(next) ? ` · next ${new Date(next).toLocaleString()}` : ''}`;
-}
+function traySummary(){return trayLifecycle.traySummary(schedules?.items ?? []);}
 function refreshTray(){
   if(!tray)return;
-  const active = schedules?.items?.filter(item => item.enabled).length ?? 0;
-  tray.setToolTip(active ? `${edition.name} · ${active} scheduled ${active === 1 ? 'task' : 'tasks'} enabled` : `${edition.name} · running in the notification area`);
-  tray.setContextMenu(Menu.buildFromTemplate([
-    { label: `Open ${edition.name}`, click: showWindow },
-    { label: traySummary(), enabled: false },
-    { type: 'separator' },
-    { label: `Quit ${edition.name}`, click: () => void shutdown() },
-  ]));
+  tray.setToolTip(trayLifecycle.trayTooltip(edition.name, schedules?.items ?? []));
+  tray.setContextMenu(Menu.buildFromTemplate(trayLifecycle.trayMenuTemplate({
+    name: edition.name, summary: traySummary(), onOpen: showWindow, onQuit: () => void shutdown(),
+  })));
 }
 function createTray(){
   if(process.platform === 'darwin' || tray)return tray;
@@ -50,8 +41,7 @@ function createTray(){
     const image = nativeImage.createFromPath(iconPath);
     if(image.isEmpty())return null;
     tray = new Tray(image.resize({ width: 32, height: 32 }));
-    tray.on('click', showWindow);
-    tray.on('double-click', showWindow);
+    for (const event of trayLifecycle.trayEvents()) tray.on(event, showWindow);
     refreshTray();
     trayTimer = setInterval(refreshTray, 60000);
     trayTimer.unref?.();
@@ -65,14 +55,14 @@ function createTray(){
 function hideToTray(){
   if(!reusableWindow())return;
   window.hide();
-  if(process.platform === 'win32' && tray && !trayHintShown){
+  if(trayLifecycle.shouldDisplayBalloon({ trayPresent: !!tray, hintShown: trayHintShown })){
     trayHintShown = true;
     try { tray.displayBalloon({ title: edition.name, content: 'Still running in the notification area so scheduled tasks can finish. Right-click the icon to quit.' }); } catch {}
   }
 }
 // Hiding is only safe when the window can be reopened: the Dock on macOS, the
 // notification area elsewhere.
-const canKeepRunningInBackground = () => hasEnabledSchedules() && (process.platform === 'darwin' || Boolean(tray));
+const canKeepRunningInBackground = () => trayLifecycle.shouldKeepRunningInBackground({ trayPresent: !!tray, enabledCount: schedules?.items?.filter(item => item.enabled).length ?? 0 });
 app.on('activate',()=>showWindow());
 app.on('second-instance', showWindow);
 async function shutdown() {
