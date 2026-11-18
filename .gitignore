@@ -5,6 +5,8 @@ data/
 assets/composio-cli/
 assets/models/sentence-encoder/
 assets/gratis.ico
+# AGENT: generated native-build.json (npm run setup:assets) — never commit it.
+assets/runtime/
 packages/cloud/.wrangler/
 packages/cloud/worker-configuration.d.ts
 packages/cloud/.dev.vars

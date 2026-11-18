@@ -1,4 +1,7 @@
 import {assertStorageCompatible} from './storage-safety.mjs';
+// AGENT: encrypted memory (AES-256-GCM) uses OpenSSL, which selects hardware
+// AES-NI automatically on Windows x64 — no manual cipher change is needed here.
+// AVX-512 paths stay disabled; see hardware-capabilities.mjs for build flags.
 import {randomBytes,randomUUID,createCipheriv,createDecipheriv,createHmac} from 'node:crypto';
 import {mkdir,readFile,writeFile,rename,unlink} from 'node:fs/promises';
 import {join} from 'node:path';

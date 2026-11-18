@@ -1,10 +1,26 @@
+/**
+ * AGENT: local speech-to-text (audio -> Whisper CLI -> optional Haiku cleanup).
+ *
+ * Windows/NVIDIA changes — read these before touching the transcription path:
+ *   1. findTool() now splits PATH with ';' on win32 and honours PATHEXT, so
+ *      ffmpeg.exe / whisper.exe are actually found (the old ':' split was Unix-only).
+ *   2. voiceTools() asks hardware-capabilities.mjs whether an NVIDIA driver is
+ *      present and returns `device`/`fp16`/`threads`. Whisper uses PyTorch, which
+ *      bundles CUDA, so driver presence is enough to attempt CUDA here.
+ *   3. whisperInvocation() is the single place that builds the CLI args; keep
+ *      all device/thread changes there (tests import it directly).
+ *   4. transcribeAudio() retries the SAME wav once on CPU if CUDA fails.
+ *
+ * Overrides: GRATIS_WHISPER_DEVICE=auto|cuda|cpu, GRATIS_CUDA_AVAILABLE=0|1.
+ */
 import { access, mkdir, mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { join, isAbsolute } from 'node:path';
+import { delimiter, join, isAbsolute } from 'node:path';
 import { homedir } from 'node:os';
 import { claudeEnvironment, streamClaudeReply } from './claude-backend.mjs';
+import { detectHardware } from './hardware-capabilities.mjs';
 
 const exec = promisify(execFile);
 const MAX_AUDIO_BYTES = 8 * 1024 * 1024;
@@ -23,22 +39,63 @@ export function decodeAudio({ audioBase64, mimeType } = {}) {
   return { bytes, ...kind };
 }
 
-async function findTool(name, env) {
-  for (const directory of [...new Set(env.PATH.split(':').filter(isAbsolute))]) {
-    const path = join(directory, name);
-    try { await access(path, constants.X_OK); return path; } catch {}
+// AGENT: on Windows isAbsolute() alone can miss drive-qualified paths when the
+// probe is simulated from another platform, so accept both forms.
+const absolute = value => isAbsolute(value) || /^[A-Za-z]:[\\/]/.test(value);
+
+// AGENT: tool discovery. `platform` is injectable for tests; production uses
+// process.platform. Windows PATH is ';' separated and needs PATHEXT extensions.
+export async function findTool(name, env, platform = process.platform) {
+  const pathValue = env.PATH || env.Path || '';
+  const directories = [...new Set(pathValue.split(platform === 'win32' ? ';' : delimiter).filter(absolute))];
+  const extensions = platform === 'win32'
+    ? [...new Set(['', ...String(env.PATHEXT || '.COM;.EXE;.BAT;.CMD').split(';').filter(Boolean)])]
+    : [''];
+  for (const directory of directories) {
+    for (const extension of extensions) {
+      const path = join(directory, name + extension);
+      try { await access(path, constants.X_OK); return path; } catch {}
+    }
   }
-  throw new Error(`Voice input needs ${name} installed on this Mac.`);
+  throw new Error(`Voice input needs ${name} installed and available on PATH.`);
 }
 
-export async function voiceTools(language = 'en') {
+// AGENT: pure device decision (no side effects) so tests can assert it.
+// CUDA driver present -> try CUDA (PyTorch ships its own CUDA runtime).
+export function resolveWhisperDevice({ gpu = {}, inference = {} } = {}, override = 'auto') {
+  if (override === 'cuda' || override === 'cpu') return override;
+  const driver = gpu.cudaDriverAvailable || gpu.cudaForInference;
+  return driver && inference.allowCuda !== false ? 'cuda' : 'cpu';
+}
+
+// AGENT: single source of truth for Whisper CLI arguments. CUDA uses fp16
+// (RTX Tensor Cores); CPU keeps fp16 False and a bounded thread count.
+export function whisperInvocation({ runtime, wav, directory, language }) {
+  const device = runtime.device === 'cuda' ? 'cuda' : 'cpu';
+  return {
+    tool: runtime.whisper,
+    args: [wav, '--model', runtime.model, '--model_dir', runtime.modelDir,
+      ...(language === 'en' ? ['--language', 'en'] : []),
+      '--device', device, '--output_dir', directory, '--output_format', 'json',
+      '--fp16', device === 'cuda' ? 'True' : 'False',
+      '--verbose', 'False', '--threads', String(runtime.threads || 4),
+      '--beam_size', '1', '--best_of', '1'],
+  };
+}
+
+// AGENT: resolves model + local tools + execution device. `hardware` is passed
+// in from main.cjs; if absent (tests/direct calls) it probes on demand.
+export async function voiceTools(language = 'en', { hardware, platform = process.platform } = {}) {
   const env = { ...claudeEnvironment(), HF_HUB_OFFLINE: '1', TRANSFORMERS_OFFLINE: '1', PYTHONNOUSERSITE: '1' };
   const model = language === 'auto' ? 'base' : 'base.en';
   const modelDir = join(homedir(), '.cache', 'whisper');
   try { await access(join(modelDir, `${model}.pt`), constants.R_OK); }
   catch { throw new Error(`Voice input needs the local Whisper ${model} model. No model was downloaded.`); }
-  const [ffmpeg, whisper] = await Promise.all([findTool('ffmpeg', env), findTool('whisper', env)]);
-  return { env, model, modelDir, ffmpeg, whisper };
+  const capabilities = hardware || await detectHardware({ platform });
+  const device = resolveWhisperDevice(capabilities, String(process.env.GRATIS_WHISPER_DEVICE || 'auto').toLowerCase());
+  const [ffmpeg, whisper] = await Promise.all([findTool('ffmpeg', env, platform), findTool('whisper', env, platform)]);
+  const threads = Math.max(1, Math.min(8, (capabilities.cpu?.threads || 5) - 1));
+  return { env, model, modelDir, ffmpeg, whisper, device, fp16: device === 'cuda', threads };
 }
 
 export function pcmInfo(wav) {
@@ -65,11 +122,11 @@ export function sameTranscriptWords(a, b) {
   return letters(a) === letters(b);
 }
 
-export async function transcribeAudio(payload, { dataDir, settings, signal, onProgress = () => {}, tools = voiceTools, run = exec, clean = streamClaudeReply } = {}) {
+export async function transcribeAudio(payload, { dataDir, settings, signal, hardware, platform, onProgress = () => {}, tools = voiceTools, run = exec, clean = streamClaudeReply } = {}) {
   const audio = decodeAudio(payload);
   signal?.throwIfAborted();
   const language = settings?.voiceLanguage === 'auto' ? 'auto' : 'en';
-  const runtime = await tools(language);
+  const runtime = await tools(language, { hardware, platform });
   const parent = join(dataDir, 'voice-tmp'); await mkdir(parent, { recursive: true, mode: 0o700 });
   const directory = await mkdtemp(join(parent, 'recording-'));
   try {
@@ -78,7 +135,21 @@ export async function transcribeAudio(payload, { dataDir, settings, signal, onPr
     onProgress('Transcribing…');
     await run(runtime.ffmpeg, ['-hide_banner', '-loglevel', 'error', '-nostdin', '-protocol_whitelist', 'file,pipe', '-f', audio.format, '-i', input, '-t', '122', '-vn', '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le', '-y', wav], { env: runtime.env, signal, timeout: 30000, maxBuffer: 256_000 });
     pcmInfo(await readFile(wav));
-    await run(runtime.whisper, [wav, '--model', runtime.model, '--model_dir', runtime.modelDir, ...(language === 'en' ? ['--language', 'en'] : []), '--device', 'cpu', '--output_dir', directory, '--output_format', 'json', '--fp16', 'False', '--verbose', 'False', '--threads', '4', '--beam_size', '1', '--best_of', '1'], { env: runtime.env, signal, timeout: 180000, maxBuffer: 512_000 });
+    const invocation = whisperInvocation({ runtime, wav, directory, language });
+    const whisperOptions = { env: runtime.env, signal, timeout: 180000, maxBuffer: 512_000 };
+    // AGENT: CUDA-first with a one-shot CPU retry. The temp wav is NOT deleted
+    // between attempts, so the fallback reuses identical audio (no re-encode).
+    try {
+      await run(invocation.tool, invocation.args, whisperOptions);
+    } catch (error) {
+      if (runtime.device !== 'cuda' || signal?.aborted) throw error;
+      // CUDA can fail even when a GPU is present (e.g. no CUDA-aware PyTorch).
+      // Retry the same audio once on AVX2 CPU before giving up.
+      onProgress('CUDA transcription unavailable; using CPU…');
+      const cpuRuntime = { ...runtime, device: 'cpu', fp16: false };
+      const fallback = whisperInvocation({ runtime: cpuRuntime, wav, directory, language });
+      await run(fallback.tool, fallback.args, whisperOptions);
+    }
     const output = JSON.parse(await readFile(join(directory, 'speech.json'), 'utf8'));
     const rawText = typeof output.text === 'string' ? output.text.trim() : '';
     if (!rawText) throw new Error('No clear speech was detected. Try recording again.');

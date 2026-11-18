@@ -24,6 +24,24 @@ test('punctuation cleanup preserves words and fails back to local transcript',as
  assert.deepEqual(await readdir(join(dataDir,'voice-tmp')),[]);
  assert.equal(sameTranscriptWords('Do not buy it.','Do buy it.'),false);
 });
+// AGENT: verifies the CUDA->CPU fallback keeps the SAME wav and flips
+// --fp16 to False, so a CUDA-less Windows install still transcribes.
+test('CUDA whisper failures retry the same audio on AVX2 CPU',async t=>{
+ const dataDir=await mkdtemp(join(tmpdir(),'gratis-voice-cuda-'));t.after(()=>rm(dataDir,{recursive:true,force:true}));
+ const calls=[];
+ const run=async(_file,args)=>{
+  if(args.includes('-i')){await writeFile(args.at(-1),wav());return;}
+  calls.push(args);
+  if(calls.length===1)throw new Error('CUDA unavailable');
+  await writeFile(join(dirname(args[0]),'speech.json'),JSON.stringify({text:'hello world',language:'en'}));
+ };
+ const tools=async()=>({ffmpeg:'fake',whisper:'fake',env:{},model:'base.en',modelDir:'fake',device:'cuda',fp16:true,threads:4});
+ const result=await transcribeAudio(audio,{dataDir,settings:{},signal:new AbortController().signal,tools,run,clean:async function*(){yield 'hello world';}});
+ assert.equal(result.text,'hello world');assert.equal(calls.length,2);
+ assert.deepEqual(calls[0].slice(calls[0].indexOf('--device'),calls[0].indexOf('--device')+2),['--device','cuda']);
+ assert.deepEqual(calls[1].slice(calls[1].indexOf('--device'),calls[1].indexOf('--device')+2),['--device','cpu']);
+ assert.ok(calls[1].includes('False'));
+});
 test('cancelled transcription removes temporary audio',async t=>{
  const dataDir=await mkdtemp(join(tmpdir(),'gratis-voice-cancel-'));t.after(()=>rm(dataDir,{recursive:true,force:true}));const controller=new AbortController();
  await assert.rejects(transcribeAudio(audio,{dataDir,settings:{},signal:controller.signal,tools:async()=>({ffmpeg:'fake',env:{}}),run:async()=>{controller.abort();throw controller.signal.reason;}}),{name:'AbortError'});

@@ -103,6 +103,11 @@ function broadcast(snapshot) {
 }
 app.whenReady().then(async () => {
   const safety=await import('./storage-safety.mjs');releaseDataLock=await safety.acquireDataLock(dataDir);await safety.prepareStorage(dataDir);
+  // AGENT: startup hardware check runs BEFORE any inference binding is loaded.
+  // `hardware` is captured by this closure and injected into both local-runtime
+  // consumers below — do not re-probe inside them (extra nvidia-smi/PowerShell).
+  const {detectHardware,logHardwareCapabilities}=await import('./hardware-capabilities.mjs');
+  const hardware=await detectHardware();logHardwareCapabilities(hardware);
   const { ChatService } = await import('./chat-service.mjs');
   const [{Connections},{WorkspaceFiles},{CloudComputer},{agentRuntime},{ComposioSignIn}] = await Promise.all([import('./connections.mjs'),import('./workspace-files.mjs'),import('./cloud-computer.mjs'),import('./agent-tools.mjs'),import('./composio-signin.mjs')]);
   const {createSecureStorageAccess}=await import('./secure-storage.mjs');secureStorageAccess=createSecureStorageAccess(safeStorage);
@@ -130,7 +135,8 @@ app.whenReady().then(async () => {
   files=new WorkspaceFiles(dataDir);
   cloud=new CloudComputer(connections,{onFrame:frame=>{if(window&&!window.isDestroyed())window.webContents.send('orbit:computer-frame',frame);},onState:state=>{if(window&&!window.isDestroyed())window.webContents.send('orbit:computer-state',controlState(state));}});
   const {MemoryService}=await import('./memory-service.mjs'),{MemoryEmbeddings}=await import('./memory-embeddings.mjs');
-  const embeddings=new MemoryEmbeddings({modelPath:(app.isPackaged?path.join(process.resourcesPath,'models','sentence-encoder'):path.join(__dirname,'../assets/models/sentence-encoder'))+path.sep});
+  // AGENT: model path is unchanged; `hardware` now drives CUDA-vs-CPU in the worker.
+  const embeddings=new MemoryEmbeddings({modelPath:(app.isPackaged?path.join(process.resourcesPath,'models','sentence-encoder'):path.join(__dirname,'../assets/models/sentence-encoder'))+path.sep,hardware});
   memory=await new MemoryService({directory:dataDir,...secureStorageAccess.keyring,embeddings,onChange:value=>{if(window&&!window.isDestroyed())window.webContents.send('orbit:memory-changed',value);}}).init();
   service = new ChatService({ dataDir, memory, workspaceFiles:files, onChange: broadcast,
     onGroupMembersChanging:async({retired,retained})=>{
@@ -296,7 +302,8 @@ app.whenReady().then(async () => {
     const { transcribeAudio } = await import('./voice.mjs');
     const job = { id: value.requestId, controller: new AbortController(), promise: null };
     voiceTask = job;
-    job.promise = transcribeAudio(value, { dataDir, settings: service.snapshot().settings, signal: job.controller.signal, onProgress: message => {
+    // AGENT: pass the startup probe into Whisper; voice.mjs decides cuda|cpu.
+    job.promise = transcribeAudio(value, { dataDir, settings: service.snapshot().settings, hardware, signal: job.controller.signal, onProgress: message => {
       if (window && !window.isDestroyed()) window.webContents.send('orbit:voice-progress', { requestId: job.id, message });
     } });
     try { return await job.promise; } finally { if (voiceTask === job) voiceTask = null; }
