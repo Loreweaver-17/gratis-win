@@ -1,0 +1,96 @@
+{
+  "schemaVersion": 1,
+  "title": "Gratis Core Windows 11 build prerequisites",
+  "target": {
+    "platform": "win32",
+    "arch": "x64",
+    "osName": "Windows 11",
+    "minimumBuild": 22000,
+    "notes": "Windows 10 may run the app but is not a supported build target."
+  },
+  "prerequisites": {
+    "node": {
+      "minimumMajor": 22,
+      "testedVersion": "26.13.1",
+      "engine": ">=22",
+      "npmMinimumMajor": 10,
+      "notes": "Node.js x64 is required to load the 64-bit ONNX Runtime and Electron binaries."
+    },
+    "python": {
+      "minimumMajor": 3,
+      "minimumMinor": 10,
+      "maximumMajor": 3,
+      "maximumMinor": 12,
+      "testedVersion": "3.11.9",
+      "requiredFor": "scripts/setup-whisper-win.mjs (isolated CUDA Whisper venv)",
+      "notes": "The py launcher is preferred on Windows. Python is optional if Whisper setup is skipped."
+    },
+    "cpu": {
+      "architecture": "x64",
+      "requiredFlags": ["avx2", "fma3", "aes"],
+      "optionalFlags": ["mmx", "sse42", "tsx"],
+      "forbiddenFlags": ["avx512f"],
+      "notes": "Native binaries are built for AVX2/FMA3 with AES-NI. AVX-512 is never enabled (it would crash non-AVX-512 CPUs)."
+    },
+    "gpu": {
+      "vendor": "NVIDIA",
+      "examples": ["GeForce RTX 5070 Ti", "GeForce RTX 40-series", "GeForce RTX 30-series"],
+      "testedDevice": "NVIDIA GeForce RTX 5070 Ti",
+      "testedDriver": "617.14",
+      "minimumCudaVersion": "12.8",
+      "cudaWheelIndex": "https://download.pytorch.org/whl/cu128",
+      "embeddingBackend": "dml",
+      "embeddingFallback": "cpu",
+      "whisperBackend": "cuda",
+      "notes": "Embeddings use DirectML (bundled with onnxruntime-node on win32/x64). Whisper needs a CUDA 12.8+ PyTorch wheel; the setup script installs it inside the venv. No global CUDA install or PATH edit is required for Gratis itself."
+    },
+    "disk": {
+      "minimumFreeGB": 25,
+      "notes": "CUDA PyTorch wheel (~2.8 GB download, ~8 GB installed), Whisper model (~140 MB), Electron/app assets and installer."
+    },
+    "network": {
+      "required": true,
+      "endpoints": [
+        "registry.npmjs.org",
+        "github.com",
+        "huggingface.co",
+        "download.pytorch.org"
+      ],
+      "notes": "Used by npm ci, the Electron binary, semantic-encoder assets and the CUDA Whisper wheels."
+    }
+  },
+  "checks": [
+    { "id": "platform", "severity": "error", "expected": "win32" },
+    { "id": "arch", "severity": "error", "expected": "x64" },
+    { "id": "node", "severity": "error", "expected": ">=22" },
+    { "id": "python", "severity": "error-if-whisper", "expected": "3.10-3.12" },
+    { "id": "gpu", "severity": "warning", "expected": "NVIDIA GPU via nvidia-smi" },
+    { "id": "cpu-simd", "severity": "warning", "expected": "avx2, fma3, aes; no avx512f" },
+    { "id": "disk", "severity": "warning", "expected": ">=25 GB free" }
+  ],
+  "bootstrap": {
+    "command": "npm run setup:win",
+    "script": "scripts/setup-win.mjs",
+    "options": [
+      { "flag": "--with-whisper", "effect": "Create the isolated .venv-whisper CUDA runtime without prompting." },
+      { "flag": "--no-whisper", "effect": "Skip Whisper setup without prompting." },
+      { "flag": "--model base.en|base", "effect": "Choose the Whisper model (default base.en)." },
+      { "flag": "--data-dir DIR", "effect": "Override the Gratis data directory used for the venv and voice-runtime.json." },
+      { "flag": "--skip-deps", "effect": "Reuse existing node_modules instead of running npm ci." },
+      { "flag": "--skip-assets", "effect": "Skip npm run setup:assets (already installed)." },
+      { "flag": "--dry-run", "effect": "Print checks and planned steps without executing them." }
+    ]
+  },
+  "verification": {
+    "tests": "npm test",
+    "publicCheck": "npm run verify:public",
+    "hardwareAudit": "node scripts/qa-hardware-audit.mjs",
+    "whisperCheck": "node scripts/setup-whisper-win.mjs --check",
+    "installer": "npm run dist:win && node test/qa-installer-check.mjs"
+  },
+  "agentNotes": [
+    "Keep this file in sync with scripts/setup-win.mjs and docs/BUILD_WINDOWS.md.",
+    "All checks are local and read-only; the bootstrapper never edits the registry, shell profile or global PATH.",
+    "The bootstrapper is safe to re-run: dependency, asset and Whisper setup steps are idempotent."
+  ]
+}

@@ -45,6 +45,9 @@ Read this file before changing anything under `src/`, `scripts/` or `test/`.
 | Whisper device/thread selection (CUDA → CPU retry), venv config | `src/voice.mjs`, `scripts/setup-whisper-win.mjs` |
 | Embedding worker device selection (DirectML → CPU on Windows) | `src/memory-embeddings.mjs`, `src/memory-embedding-worker.mjs` |
 | Windows installer packaging | `package.json` (`build`, `build:win`, `dist:win`), `scripts/make-ico.mjs`, `assets/gratis.ico` |
+| Windows prerequisites (human + machine readable) | `BUILD_WINDOWS.md`, `requirements-windows.json` |
+| One-command Windows bootstrap | `scripts/setup-win.mjs` (`npm run setup:win`), tested by `test/setup-win.test.mjs` |
+| Hardware audit / E2E / installer QA | `scripts/qa-hardware-audit.mjs`, `test/qa-e2e-desktop.mjs`, `test/qa-installer-check.mjs` |
 
 ## External commands
 

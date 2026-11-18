@@ -12,6 +12,7 @@
     "test": "node --test test/*.test.mjs",
     "test:desktop": "node test/community-desktop.mjs",
     "test:ui": "node test/ui-polish.mjs",
+    "setup:win": "node scripts/setup-win.mjs",
     "setup:assets": "node scripts/setup-assets.mjs",
     "setup:whisper:win": "node scripts/setup-whisper-win.mjs",
     "verify:public": "node scripts/verify-public.mjs",
